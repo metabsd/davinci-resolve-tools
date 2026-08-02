@@ -69,18 +69,21 @@ def _load_onnx_session(providers: list[str]):
     """Export yolo11n to ONNX (if needed) and open an onnxruntime InferenceSession.
 
     Implementation notes:
-      - We export via `torch.onnx.export` directly on the raw torch module under
-        Ultralytics' wrapper. Ultralytics' own `.export(format="onnx")` triggers a
-        pip-auto-install of onnx/onnxruntime/onnxslim while the onnxruntime DLL
-        is already loaded into the running process — which hits
-        `WinError 5: Access is denied` on Windows. Doing the export ourselves
-        side-steps that whole pip-dance.
-      - The .onnx file is written once next to the .pt file and reused on
-        subsequent runs.
+      - We use Ultralytics' native ONNX exporter (it builds the graph manually,
+        so it actually honors the requested `opset=12`). We do NOT use
+        torch.onnx.export because torch 2.13+ force-bumps to opset 18 and
+        onnxscript then fails to downgrade Resize → incompatible ONNX for DML.
+      - Auto-install: Ultralytics' auto-pip-install dance used to corrupt the
+        already-loaded onnxruntime DLL (WinError 5) on Windows. With
+        requirements.txt now pre-installing onnx + onnxslim + onnxruntime
+        (via -directml), Ultralytics' `check_requirements()` is satisfied and
+        it skips the auto-install entirely.
+      - DML fallback: if the DML provider refuses to compile the ONNX model
+        (it doesn't support every op at every opset yet), we transparently
+        fall back to CPU so the tool *always* produces output.
     """
     from pathlib import Path as _Path
     import onnxruntime as ort  # type: ignore[import-not-found]
-    import torch  # type: ignore[import-not-found]
     from ultralytics import YOLO  # type: ignore[import-not-found]
 
     pt_path = _Path("yolo11n.pt")
@@ -88,31 +91,39 @@ def _load_onnx_session(providers: list[str]):
 
     if not onnx_path.exists():
         # Loading the .pt triggers Ultralytics to download it if missing.
-        # We grab the underlying torch.nn.Module (no Ultralytics wrappers).
         wrapper = YOLO(str(pt_path))
-        torch_model = wrapper.model  # DetectionModel — a torch.nn.Module
-        torch_model.eval()
-
-        # Dummy input matching the export resolution (320x320 RGB, 0..1).
-        # We always export at 320: tiny enough for iGPUs, big enough for
-        # person-level detection at 1080p source video.
-        dummy = torch.zeros(1, 3, 320, 320)
-
-        # opset_version=12 required by onnxruntime-directml. dynamo=False
-        # keeps us on the stable TorchScript-based exporter (the new dynamo
-        # path requires extra packages we don't want to drag in).
-        torch.onnx.export(
-            torch_model,
-            dummy,
-            str(onnx_path),
-            opset_version=12,
-            input_names=["images"],
-            output_names=["output0"],
-            dynamic_axes=None,  # static shape = simpler/faster on every backend
+        # `format="onnx"` triggers Ultralytics' native ONNX builder.
+        # `opset=12` is honored by Ultralytics (unlike torch.onnx.export).
+        # `simplify=True` runs onnxslim for a cleaner graph that DML can ingest.
+        # `half=False` keeps FP32 (safe across all providers).
+        wrapper.export(
+            format="onnx",
+            imgsz=320,
+            opset=12,
+            simplify=True,
+            half=False,
         )
 
-    sess = ort.InferenceSession(str(onnx_path), providers=providers)
-    return sess, _input_name(sess), _output_name(sess)
+    sess = None
+    fallback_reason: str | None = None
+    if providers and providers != ["CPUExecutionProvider"]:
+        try:
+            sess = ort.InferenceSession(str(onnx_path), providers=providers)
+        except Exception as e:
+            # DML (or CUDA) refused the model. Fall back to CPU so the tool
+            # still runs — slower, but it runs.
+            fallback_reason = f"{type(e).__name__}: {e}"
+
+    if sess is None:
+        sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+
+    return (
+        sess,
+        _input_name(sess),
+        _output_name(sess),
+        sess.get_providers(),
+        fallback_reason,
+    )
 
 
 def _input_name(sess) -> str:
@@ -233,9 +244,17 @@ def detect_people(
     # Ultralytics' own forward pass is required because Ultralytics' .to() is
     # a PyTorch wrapper that doesn't accept "dml" as a device string.
     provider_name, providers = _detect_providers()
+    sess, input_name, output_name, active_providers, fallback_reason = _load_onnx_session(providers)
+    active_provider_name = ", ".join(active_providers) or "(none)"
     if not quiet:
-        print(f"[detect] Using onnxruntime provider: {provider_name}", file=sys.stderr)
-    sess, input_name, output_name = _load_onnx_session(providers)
+        if fallback_reason is not None:
+            print(
+                f"[detect] Requested provider '{provider_name}' failed: {fallback_reason}",
+                file=sys.stderr,
+            )
+            print(f"[detect] Falling back to: {active_provider_name}", file=sys.stderr)
+        else:
+            print(f"[detect] Using onnxruntime provider: {active_provider_name}", file=sys.stderr)
 
     # Pre-compute the letterbox transform for one input size.
     # Ultralytics uses 640 by default but we export at 320 for speed on iGPUs.

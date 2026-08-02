@@ -67,11 +67,29 @@ start_seconds,end_seconds,duration_seconds,avg_confidence
 
 ## Tips
 
+- Au lancement, le détecteur affiche `[detect] Using device: dml` (ton iGPU
+  AMD RDNA 3), `0` (NVIDIA CUDA) ou `cpu`. Si tu vois toujours `cpu` alors que
+  tu as un GPU, installe `onnxruntime-directml` (déjà dans `requirements.txt`).
 - Pour une **preview rapide** sur une longue vidéo : `--sample-every 5` (~5× plus rapide).
 - Si tu as un GPU NVIDIA, installe PyTorch CUDA → ~10× plus rapide (voir doc install globale).
 - Le détecteur fonctionne avec **n'importe quel format vidéo** supporté par FFmpeg/OpenCV
   (.mp4, .mov, .mxf, .mkv...).
 - Les markers sont créés en **bleu** sur toute la durée de présence (`duration_frames > 0`).
+
+## Compatibilité GPU
+
+Le détecteur utilise **DirectML** par défaut (via `onnxruntime-directml`),
+ce qui couvre :
+
+- ✅ **AMD iGPU RDNA 2/3** : Asus ROG Ally, ROG Ally X (Ryzen Z1 Extreme), Steam Deck APU,
+  Ryzen 6000/7000/8000 series laptops
+- ✅ **AMD Radeon dédié** RX 5000/6000/7000
+- ✅ **Intel Arc** + iGPU Intel Xe
+- ✅ **NVIDIA** GeForce (équivalent à PyTorch+CUDA pour cette charge)
+- ✅ CPU fallback (toujours disponible)
+
+Aucune installation de drivers supplémentaires n'est nécessaire sur AMD/Intel
+: le driver AMD Adrenalin ou Intel installé par Windows Update suffit.
 
 ## Limites connues
 

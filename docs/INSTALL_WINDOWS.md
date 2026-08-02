@@ -44,7 +44,7 @@ cd davinci-resolve-tools
 
 ---
 
-## 3. Créer le venv et installer les dépendances
+### 3. Créer le venv et installer les dépendances
 
 ```powershell
 # Dans C:\dev\davinci-resolve-tools
@@ -64,12 +64,22 @@ pip install -r requirements.txt
 
 Premier install : ~2 minutes (Ultralytics télécharge YOLO11n ≈ 6 MB à la première exécution).
 
-### Accélérer YOLO (optionnel)
+### Accélérer YOLO — par type de GPU
 
-CPU only, ça marche. Pour aller 5–10× plus vite avec une carte NVIDIA :
-```powershell
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-```
+Le `requirements.txt` installe déjà **`onnxruntime-directml`** qui couvre **tous
+les GPU modernes via DirectX 12** (AMD, Intel, NVIDIA). Pas besoin de drivers
+spéciaux : ton driver AMD Adrenalin (fourni par Windows Update) suffit.
+
+| Matériel | Action | Résultat |
+|---|---|---|
+| **AMD iGPU RDNA 2/3** (ROG Ally X, Steam Deck, Ryzen laptop) | Aucune — `pip install -r requirements.txt` suffit | ~5–10× plus rapide que CPU |
+| **AMD Radeon dédié** (RX 6000/7000) | Idem, DirectML suffit | ~10× plus rapide que CPU |
+| **Intel Arc / Intel iGPU** | Idem, DirectML suffit | ~5× plus rapide que CPU |
+| **NVIDIA GPU** | Ajoute : `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121` | ~10× plus rapide que CPU |
+| **CPU only** (vieux laptop sans GPU compatible) | Supprime la ligne `onnxruntime-directml` du `requirements.txt` puis réinstalle | Ralentit, mais fonctionne |
+
+Le détecteur choisit automatiquement le backend au runtime et affiche
+`[detect] Using device: dml` au démarrage si ton GPU est utilisé.
 
 ---
 
@@ -177,6 +187,7 @@ pip install -r requirements.txt --upgrade
 | `Couldn't connect to Resolve` au lancement de l'import | Scripting externe pas activé | Retour étape 4 |
 | `RuntimeError: no clip selected in timeline` | Pas de clip sélectionné dans Resolve | Clique le clip dans le timeline avant de lancer l'import |
 | YOLO télécharge `yolo11n.pt` à chaque fois | Problème réseau ou cache vidé | Normal la 1ʳᵉ fois, ensuite c'est mis en cache dans `%USERPROFILE%\.cache\ultralytics` |
-| `CUDA not available` warnings | Pas de GPU NVIDIA | Ignorer — ça marche quand même en CPU |
+| `[detect] Using device: cpu` alors que tu as un GPU AMD | `onnxruntime-directml` n'a pas été installé | `pip install onnxruntime-directml` dans ton venv, puis relance |
+| `CUDA not available` warnings | Pas de GPU NVIDIA | Ignorer — ça marche quand même en CPU, ou avec DirectML si installé |
 | Markers invisibles après import | Resolve Color clip vs audio clip | Sélectionne un clip **vidéo** dans la timeline, pas une piste audio |
 | PowerShell refuse l'activation du venv | Execution policy | `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` |

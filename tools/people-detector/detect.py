@@ -24,6 +24,44 @@ from ultralytics import YOLO  # type: ignore[import-not-found]
 
 
 # ---------------------------------------------------------------------------
+# Backend auto-detection
+# ---------------------------------------------------------------------------
+def _pick_device() -> str:
+    """Return the best available compute device for Ultralytics YOLO.
+
+    Returns one of:
+      - "dml" if onnxruntime-directml is importable (covers AMD RDNA,
+        Intel Arc, NVIDIA, basically any DX12 GPU on Windows)
+      - "0"  if PyTorch sees a CUDA device (NVIDIA only, requires the
+        torch+CUDA wheels installed separately)
+      - "cpu" fallback (always works)
+    """
+    # 1. DirectML — preferred on Windows because it covers every modern GPU
+    #    (AMD RDNA, Intel Arc, NVIDIA) without per-vendor installs.
+    try:
+        import onnxruntime as ort  # type: ignore[import-not-found]
+
+        # Available providers string includes "DmlExecutionProvider" when the
+        # DirectML package is installed.
+        if "DmlExecutionProvider" in ort.get_available_providers():
+            return "dml"
+    except ImportError:
+        pass
+
+    # 2. CUDA — NVIDIA only.
+    try:
+        import torch  # type: ignore[import-not-found]
+
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            return "0"
+    except ImportError:
+        pass
+
+    # 3. CPU — always works, just slower.
+    return "cpu"
+
+
+# ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
 @dataclass
@@ -50,6 +88,7 @@ def detect_people(
     video_path: Path,
     confidence: float,
     sample_every_n_frames: int,
+    quiet: bool = False,
 ) -> list[PersonRange]:
     """Return a list of time ranges during which a person is visible.
 
@@ -76,9 +115,16 @@ def detect_people(
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     # YOLO11 nano: ~6 MB, mAP ~50 on COCO. Tiny hit on accuracy vs. huge speed win.
-    model = YOLO("yolo11n.pt")
+    # We auto-pick the best available compute device:
+    #   "dml" (DirectML) → any DX12 GPU — RDNA 3 on ROG Ally X, Intel Arc, etc.
+    #   "0"  (CUDA)      → first NVIDIA GPU (only if PyTorch+CUDA is installed)
+    #   "cpu"            → CPU fallback (always works)
+    device = _pick_device()
+    if not quiet:
+        print(f"[detect] Using device: {device}", file=sys.stderr)
+    model = YOLO("yolo11n.pt").to(device)
 
-    ranges: list[PersonRange] = []
+    ranges: list[PersonRange] = []  # noqa: F821
     current_start: float | None = None
     current_confs: list[float] = []
 
@@ -242,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
         video_path=args.video,
         confidence=args.confidence,
         sample_every_n_frames=args.sample_every,
+        quiet=args.quiet,
     )
 
     ext = args.output.suffix.lower()

@@ -1,0 +1,18 @@
+# Core
+ultralytics>=8.3.0    # YOLO11 — person detection (yolo11n.pt auto-downloads on first run)
+opencv-python>=4.9.0   # Video I/O, frame reading
+numpy>=1.26.0         # Array ops (pulled by opencv/ultralytics anyway)
+
+# Optional: speed up CPU inference ~30% on x86
+# Uncomment if you have an Intel CPU and want it (works without too)
+# onnxruntime>=1.18.0
+
+# Optional: GPU acceleration (NVIDIA only — skip on CPU-only machines)
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# ---------------------------------------------------------------------------
+# IMPORTANT — DaVinci Resolve Python API:
+# Resolve ships its own Python 3.x inside the install folder
+# (e.g. C:\Program Files\Blackmagic Design\DaVinci Resolve\python.exe on Win).
+# The import_resolve.py script MUST be run with THAT interpreter, NOT this venv.
+# See README.md → "Import the markers into Resolve" for the exact command.

@@ -1,0 +1,13 @@
+* text=auto eol=lf
+*.py  text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf
+*.csv text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Shell scripts must keep LF on Windows (Git autocrlf handles this)
+*.sh  text eol=lf
+
+# Resolve import files: LF unless Resolve Studio on Windows dislikes it
+*.xml text eol=lf

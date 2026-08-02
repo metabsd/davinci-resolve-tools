@@ -68,27 +68,47 @@ def _detect_providers() -> tuple[str, list[str]]:
 def _load_onnx_session(providers: list[str]):
     """Export yolo11n to ONNX (if needed) and open an onnxruntime InferenceSession.
 
-    We export once to `<model_name>.onnx` next to `yolo11n.pt` (which Ultralytics
-    downloads on demand). Re-export only if the ONNX file is missing.
+    Implementation notes:
+      - We export via `torch.onnx.export` directly on the raw torch module under
+        Ultralytics' wrapper. Ultralytics' own `.export(format="onnx")` triggers a
+        pip-auto-install of onnx/onnxruntime/onnxslim while the onnxruntime DLL
+        is already loaded into the running process — which hits
+        `WinError 5: Access is denied` on Windows. Doing the export ourselves
+        side-steps that whole pip-dance.
+      - The .onnx file is written once next to the .pt file and reused on
+        subsequent runs.
     """
     from pathlib import Path as _Path
     import onnxruntime as ort  # type: ignore[import-not-found]
+    import torch  # type: ignore[import-not-found]
     from ultralytics import YOLO  # type: ignore[import-not-found]
 
     pt_path = _Path("yolo11n.pt")
     onnx_path = _Path("yolo11n.onnx")
 
     if not onnx_path.exists():
-        # Ultralytics handles the export; this triggers a one-time conversion.
-        # imgsz=320 keeps the model small/fast (good enough for "person" detection).
-        # opset=12 is required by onnxruntime-directml.
-        # simplify=True runs onnx-simplifier for a leaner graph.
-        YOLO(str(pt_path)).export(
-            format="onnx",
-            imgsz=320,
-            opset=12,
-            simplify=True,
-            half=False,  # FP32 is the safest default across providers
+        # Loading the .pt triggers Ultralytics to download it if missing.
+        # We grab the underlying torch.nn.Module (no Ultralytics wrappers).
+        wrapper = YOLO(str(pt_path))
+        torch_model = wrapper.model  # DetectionModel — a torch.nn.Module
+        torch_model.eval()
+
+        # Dummy input matching the export resolution (320x320 RGB, 0..1).
+        # We always export at 320: tiny enough for iGPUs, big enough for
+        # person-level detection at 1080p source video.
+        dummy = torch.zeros(1, 3, 320, 320)
+
+        # opset_version=12 required by onnxruntime-directml. dynamo=False
+        # keeps us on the stable TorchScript-based exporter (the new dynamo
+        # path requires extra packages we don't want to drag in).
+        torch.onnx.export(
+            torch_model,
+            dummy,
+            str(onnx_path),
+            opset_version=12,
+            input_names=["images"],
+            output_names=["output0"],
+            dynamic_axes=None,  # static shape = simpler/faster on every backend
         )
 
     sess = ort.InferenceSession(str(onnx_path), providers=providers)

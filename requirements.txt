@@ -3,6 +3,16 @@ ultralytics>=8.3.0      # YOLO11 — person detection (yolo11n.pt auto-downloads
 opencv-python>=4.9.0    # Video I/O, frame reading
 numpy>=1.26.0           # Array ops (pulled by opencv/ultralytics anyway)
 
+# Needed for the one-time yolo11n.pt → yolo11n.onnx export at first launch via
+# torch.onnx.export(). We deliberately do NOT go through Ultralytics' .export()
+# because it tries to auto-pip-install these packages WHILE the onnxruntime
+# DLL it would overwrite is held open by the running process → WinError 5
+# Access Denied on Windows. Pre-installing these here side-steps that dance.
+onnx>=1.12.0,<2.0.0
+# torch 2.13+ requires onnxscript at export time even for the legacy
+# TorchScript-based ONNX exporter. Pulled in as a hard requirement.
+onnxscript>=0.2.2
+
 # GPU acceleration — works on BOTH NVIDIA and AMD iGPUs (including RDNA 3 on
 # Asus ROG Ally X, Ryzen Z1 Extreme, etc.). DirectML is Microsoft's DirectX 12
 # ML runtime; it's bundled with Windows 10/11, so no AMD driver work needed

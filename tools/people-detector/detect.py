@@ -20,45 +20,138 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import cv2  # type: ignore[import-not-found]
-from ultralytics import YOLO  # type: ignore[import-not-found]
 
 
 # ---------------------------------------------------------------------------
 # Backend auto-detection
 # ---------------------------------------------------------------------------
-def _pick_device() -> str:
-    """Return the best available compute device for Ultralytics YOLO.
+def _detect_providers() -> tuple[str, list[str]]:
+    """Return (onnxruntime_providers, ultralytics_device).
 
-    Returns one of:
-      - "dml" if onnxruntime-directml is importable (covers AMD RDNA,
-        Intel Arc, NVIDIA, basically any DX12 GPU on Windows)
-      - "0"  if PyTorch sees a CUDA device (NVIDIA only, requires the
-        torch+CUDA wheels installed separately)
-      - "cpu" fallback (always works)
+    `onnxruntime_providers` is what we feed `onnxruntime.InferenceSession(...,
+    providers=...)`. Falls back to `["CPUExecutionProvider"]` if nothing else is
+    available.
+
+    `ultralytics_device` is the string we pass to Ultralytics `.predict(device=)`.
+    Ultralytics DOES NOT support DirectML natively (its `.to()` is a thin
+    PyTorch wrapper and PyTorch doesn't include "dml"), so the right answer is
+    to bypass Ultralytics' own inference on AMD iGPUs — we use Ultralytics only
+    to export the model to ONNX, then run inference through onnxruntime.
+
+    Returns:
+        ("CUDAExecutionProvider", ["CUDAExecutionProvider"]) on NVIDIA
+        ("DmlExecutionProvider",  ["DmlExecutionProvider"]) on AMD/Intel/NVIDIA
+            via DirectML
+        ("CPUExecutionProvider",  ["CPUExecutionProvider"]) fallback
     """
-    # 1. DirectML — preferred on Windows because it covers every modern GPU
-    #    (AMD RDNA, Intel Arc, NVIDIA) without per-vendor installs.
     try:
         import onnxruntime as ort  # type: ignore[import-not-found]
 
-        # Available providers string includes "DmlExecutionProvider" when the
-        # DirectML package is installed.
-        if "DmlExecutionProvider" in ort.get_available_providers():
-            return "dml"
+        available = ort.get_available_providers()
     except ImportError:
-        pass
+        return ("CPUExecutionProvider", ["CPUExecutionProvider"])
 
-    # 2. CUDA — NVIDIA only.
-    try:
-        import torch  # type: ignore[import-not-found]
+    if "CUDAExecutionProvider" in available:
+        # Prefer CUDA on NVIDIA boxes (it's faster than DirectML on the same
+        # GPU) — DirectML is the fallback if for some reason CUDA isn't usable.
+        return ("CUDAExecutionProvider", ["CUDAExecutionProvider"])
 
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            return "0"
-    except ImportError:
-        pass
+    if "DmlExecutionProvider" in available:
+        return ("DmlExecutionProvider", ["DmlExecutionProvider"])
 
-    # 3. CPU — always works, just slower.
-    return "cpu"
+    return ("CPUExecutionProvider", ["CPUExecutionProvider"])
+
+
+# ---------------------------------------------------------------------------
+# ONNX session helper
+# ---------------------------------------------------------------------------
+def _load_onnx_session(providers: list[str]):
+    """Export yolo11n to ONNX (if needed) and open an onnxruntime InferenceSession.
+
+    We export once to `<model_name>.onnx` next to `yolo11n.pt` (which Ultralytics
+    downloads on demand). Re-export only if the ONNX file is missing.
+    """
+    from pathlib import Path as _Path
+    import onnxruntime as ort  # type: ignore[import-not-found]
+    from ultralytics import YOLO  # type: ignore[import-not-found]
+
+    pt_path = _Path("yolo11n.pt")
+    onnx_path = _Path("yolo11n.onnx")
+
+    if not onnx_path.exists():
+        # Ultralytics handles the export; this triggers a one-time conversion.
+        # imgsz=320 keeps the model small/fast (good enough for "person" detection).
+        # opset=12 is required by onnxruntime-directml.
+        # simplify=True runs onnx-simplifier for a leaner graph.
+        YOLO(str(pt_path)).export(
+            format="onnx",
+            imgsz=320,
+            opset=12,
+            simplify=True,
+            half=False,  # FP32 is the safest default across providers
+        )
+
+    sess = ort.InferenceSession(str(onnx_path), providers=providers)
+    return sess, _input_name(sess), _output_name(sess)
+
+
+def _input_name(sess) -> str:
+    return sess.get_inputs()[0].name
+
+
+def _output_name(sess) -> str:
+    return sess.get_outputs()[0].name
+
+
+# Person-class index in the COCO 80-class list (Ultralytics follows COCO order).
+PERSON_CLASS_ID = 0
+
+
+def _letterbox(img, new_w: int, new_h: int) -> tuple:
+    """Resize + pad `img` to (new_w, new_h) keeping aspect ratio.
+
+    Returns (resized_image, scale, pad_left, pad_top).
+
+    YOLO models are trained on letterboxed inputs at training resolution, so
+    any new frame must go through the same transform for inference to be valid.
+    """
+    h0, w0 = img.shape[:2]
+    r = min(new_w / w0, new_h / h0)
+    new_unpad_w, new_unpad_h = int(round(w0 * r)), int(round(h0 * r))
+    pad_l = (new_w - new_unpad_w) // 2
+    pad_t = (new_h - new_unpad_h) // 2
+    resized = cv2.resize(img, (new_unpad_w, new_unpad_h), interpolation=cv2.INTER_LINEAR)
+    padded = cv2.copyMakeBorder(
+        resized, pad_t, new_h - new_unpad_h - pad_t, pad_l, new_w - new_unpad_w - pad_l,
+        borderType=cv2.BORDER_CONSTANT, value=(114, 114, 114),
+    )
+    return padded, r, pad_l, pad_t
+
+
+def _run_onnx_inference(frame, sess, input_name: str, output_name: str,
+                        input_w: int, input_h: int, confidence: float) -> list[float]:
+    """Run a single YOLO11 frame through the ONNX session.
+
+    The YOLO11 ONNX export has a single output of shape [1, 84, N_anchors] —
+    4 box coords (x, y, w, h) followed by 80 COCO class scores. Anchor 0 = the
+    "person" class. We don't need full NMS for the time-range product; it's
+    enough to count distinct detections (we only need "was a person seen?").
+    """
+    import numpy as np  # type: ignore[import-not-found]
+
+    img, r, pad_l, pad_t = _letterbox(frame, input_w, input_h)
+    # HWC uint8 BGR → NCHW float32 normalized to [0, 1], RGB order.
+    blob = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    blob = np.transpose(blob, (2, 0, 1))[None, ...]  # 1x3xHxW
+
+    outputs = sess.run([output_name], {input_name: blob})
+    pred = outputs[0]  # shape [1, 84, N_anchors]
+
+    # Best class score per anchor.
+    class_scores = pred[0, 4:, :]                   # [80, N]
+    person_scores = class_scores[PERSON_CLASS_ID]  # [N]
+    mask = person_scores >= confidence
+    return person_scores[mask].tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -115,16 +208,21 @@ def detect_people(
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     # YOLO11 nano: ~6 MB, mAP ~50 on COCO. Tiny hit on accuracy vs. huge speed win.
-    # We auto-pick the best available compute device:
-    #   "dml" (DirectML) → any DX12 GPU — RDNA 3 on ROG Ally X, Intel Arc, etc.
-    #   "0"  (CUDA)      → first NVIDIA GPU (only if PyTorch+CUDA is installed)
-    #   "cpu"            → CPU fallback (always works)
-    device = _pick_device()
+    # We export to ONNX once and run inference through onnxruntime (which can
+    # target DirectML on AMD/Intel/NVIDIA GPUs through DX12). Bypassing
+    # Ultralytics' own forward pass is required because Ultralytics' .to() is
+    # a PyTorch wrapper that doesn't accept "dml" as a device string.
+    provider_name, providers = _detect_providers()
     if not quiet:
-        print(f"[detect] Using device: {device}", file=sys.stderr)
-    model = YOLO("yolo11n.pt").to(device)
+        print(f"[detect] Using onnxruntime provider: {provider_name}", file=sys.stderr)
+    sess, input_name, output_name = _load_onnx_session(providers)
 
-    ranges: list[PersonRange] = []  # noqa: F821
+    # Pre-compute the letterbox transform for one input size.
+    # Ultralytics uses 640 by default but we export at 320 for speed on iGPUs.
+    input_w = sess.get_inputs()[0].shape[2] or 320
+    input_h = sess.get_inputs()[0].shape[3] or 320
+
+    ranges: list[PersonRange] = []
     current_start: float | None = None
     current_confs: list[float] = []
 
@@ -136,13 +234,9 @@ def detect_people(
                 break
 
             if frame_index % sample_every_n_frames == 0:
-                # verbose=False suppresses per-frame console spam.
-                # classes=[0] filters COCO "person" class (index 0).
-                results = model(frame, classes=[0], conf=confidence, verbose=False)
-                person_confs: list[float] = []
-                for r in results:
-                    for box in r.boxes:
-                        person_confs.append(float(box.conf))
+                person_confs = _run_onnx_inference(
+                    frame, sess, input_name, output_name, input_w, input_h, confidence
+                )
 
                 t = frame_index / fps
                 if person_confs:

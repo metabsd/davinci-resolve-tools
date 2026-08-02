@@ -67,29 +67,41 @@ start_seconds,end_seconds,duration_seconds,avg_confidence
 
 ## Tips
 
-- Au lancement, le détecteur affiche `[detect] Using device: dml` (ton iGPU
-  AMD RDNA 3), `0` (NVIDIA CUDA) ou `cpu`. Si tu vois toujours `cpu` alors que
-  tu as un GPU, installe `onnxruntime-directml` (déjà dans `requirements.txt`).
+- Au lancement, le détecteur affiche le provider utilisé :
+  ```
+  [detect] Using onnxruntime provider: DmlExecutionProvider   # ton iGPU AMD
+  [detect] Using onnxruntime provider: CUDAExecutionProvider  # NVIDIA
+  [detect] Using onnxruntime provider: CPUExecutionProvider   # fallback
+  ```
+  Si tu vois `CPUExecutionProvider` alors que tu as un GPU, installe
+  `onnxruntime-directml` (déjà dans `requirements.txt`).
+- Premier lancement : ~10 s supplémentaires pour exporter yolo11n → yolo11n.onnx.
+  Le fichier `.onnx` est mis en cache dans le dossier courant. Relances suivantes : instantané.
 - Pour une **preview rapide** sur une longue vidéo : `--sample-every 5` (~5× plus rapide).
-- Si tu as un GPU NVIDIA, installe PyTorch CUDA → ~10× plus rapide (voir doc install globale).
 - Le détecteur fonctionne avec **n'importe quel format vidéo** supporté par FFmpeg/OpenCV
   (.mp4, .mov, .mxf, .mkv...).
 - Les markers sont créés en **bleu** sur toute la durée de présence (`duration_frames > 0`).
 
 ## Compatibilité GPU
 
-Le détecteur utilise **DirectML** par défaut (via `onnxruntime-directml`),
-ce qui couvre :
+Le détecteur utilise **ONNX Runtime** avec un provider auto-détecté. Ça couvre :
 
 - ✅ **AMD iGPU RDNA 2/3** : Asus ROG Ally, ROG Ally X (Ryzen Z1 Extreme), Steam Deck APU,
-  Ryzen 6000/7000/8000 series laptops
-- ✅ **AMD Radeon dédié** RX 5000/6000/7000
-- ✅ **Intel Arc** + iGPU Intel Xe
-- ✅ **NVIDIA** GeForce (équivalent à PyTorch+CUDA pour cette charge)
-- ✅ CPU fallback (toujours disponible)
+  Ryzen 6000/7000/8000 series laptops — via `DmlExecutionProvider` (DirectML)
+- ✅ **AMD Radeon dédié** RX 5000/6000/7000 — idem DirectML
+- ✅ **Intel Arc** + iGPU Intel Xe — idem DirectML
+- ✅ **NVIDIA** GeForce — via `CUDAExecutionProvider` si onnxruntime-gpu est aussi installé,
+  sinon DirectML (un peu plus lent mais marche)
+- ✅ CPU fallback (toujours disponible via `CPUExecutionProvider`)
 
-Aucune installation de drivers supplémentaires n'est nécessaire sur AMD/Intel
-: le driver AMD Adrenalin ou Intel installé par Windows Update suffit.
+> **Pourquoi pas `Ultralytics device="dml"` ?** Parce qu'Ultralytics passe par
+> PyTorch `.to()` qui ne reconnaît pas `dml` comme device string (PyTorch est
+> CUDA/MPS/XPU only). On exporte donc le modèle en **ONNX** au premier lancement,
+> puis on l'infère via `onnxruntime` qui lui supporte DirectML nativement. Voilà
+> pourquoi le message au démarrage dit `onnxruntime provider: …` et pas `device:`.
+
+Aucune installation de drivers supplémentaires n'est nécessaire sur AMD/Intel :
+le driver AMD Adrenalin ou Intel installé par Windows Update suffit.
 
 ## Limites connues
 

@@ -187,7 +187,8 @@ pip install -r requirements.txt --upgrade
 | `Couldn't connect to Resolve` au lancement de l'import | Scripting externe pas activé | Retour étape 4 |
 | `RuntimeError: no clip selected in timeline` | Pas de clip sélectionné dans Resolve | Clique le clip dans le timeline avant de lancer l'import |
 | YOLO télécharge `yolo11n.pt` à chaque fois | Problème réseau ou cache vidé | Normal la 1ʳᵉ fois, ensuite c'est mis en cache dans `%USERPROFILE%\.cache\ultralytics` |
-| `[detect] Using device: cpu` alors que tu as un GPU AMD | `onnxruntime-directml` n'a pas été installé | `pip install onnxruntime-directml` dans ton venv, puis relance |
+| `[detect] Using device: cpu` (legacy) ou `CPUExecutionProvider` alors que tu as un GPU AMD | `onnxruntime-directml` n'a pas été installé ou n'a pas chargé `DmlExecutionProvider` | `pip install onnxruntime-directml` dans ton venv puis relance ; si ça persiste, désinstalle/réinstalle le package `onnxruntime-directml` complet (≈ 11 MB) |
+| `RuntimeError: Expected one of cpu, cuda, … at start of device string: dml` | Ancienne version du code où `.to("dml")` était appelé | Fais `git pull` — le code utilise maintenant `onnxruntime` (pas `Ultralytics.to()`) |
 | `CUDA not available` warnings | Pas de GPU NVIDIA | Ignorer — ça marche quand même en CPU, ou avec DirectML si installé |
 | Markers invisibles après import | Resolve Color clip vs audio clip | Sélectionne un clip **vidéo** dans la timeline, pas une piste audio |
 | PowerShell refuse l'activation du venv | Execution policy | `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` |
